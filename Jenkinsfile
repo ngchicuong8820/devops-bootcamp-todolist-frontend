@@ -18,8 +18,8 @@ pipeline {
             steps {
                 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
                 echo "🔍 Branch : ${env.BRANCH_NAME ?: 'manual'}"
+                echo "🔍 PR#    : ${env.CHANGE_ID ?: 'N/A - Branch Push'}"
                 echo "🔍 Build  : #${BUILD_NUMBER}"
-                echo "🔍 Commit : ${env.GIT_COMMIT ?: 'N/A'}"
                 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
                 checkout scm
             }
@@ -30,7 +30,7 @@ pipeline {
         // ══════════════════════════════════════
         stage('Build') {
             steps {
-                echo "🔨 Building Docker image: ${IMAGE_NAME}:${IMAGE_TAG}"
+                echo "🔨 Building: ${IMAGE_NAME}:${IMAGE_TAG}"
                 sh """
                     docker build \
                         --build-arg NEXT_PUBLIC_API_URL=${BACKEND_URL} \
@@ -60,7 +60,7 @@ pipeline {
 
         // ══════════════════════════════════════
         // STAGE 4: QUALITY GATE
-        // ⛔ CI workflow DỪNG Ở ĐÂY nếu là PR
+        // ⛔ CI (PR) DỪNG Ở ĐÂY
         // ══════════════════════════════════════
         stage('Quality Gate') {
             steps {
@@ -82,14 +82,17 @@ pipeline {
 
         // ══════════════════════════════════════
         // STAGE 5: PUSH TO DOCKER HUB
-        // Chỉ chạy khi push vào main
+        // Chỉ chạy khi push to main
         // ══════════════════════════════════════
         stage('Push to Docker Hub') {
             when {
-                branch 'main'
+                allOf {
+                    branch 'main'
+                    not { changeRequest() }
+                }
             }
             steps {
-                echo "📦 Pushing ${IMAGE_NAME}:${IMAGE_TAG} to Docker Hub..."
+                echo "📦 Pushing ${IMAGE_NAME}:${IMAGE_TAG}..."
                 withCredentials([usernamePassword(
                     credentialsId: 'DOCKERHUB_CREDS',
                     usernameVariable: 'DOCKER_USER',
@@ -98,11 +101,9 @@ pipeline {
                     sh """
                         echo "${DOCKER_PASS}" | docker login \
                             -u "${DOCKER_USER}" --password-stdin
-
                         docker push ${IMAGE_NAME}:${IMAGE_TAG}
                         docker push ${IMAGE_NAME}:latest
-
-                        echo "✅ Push SUCCESS: ${IMAGE_NAME}:${IMAGE_TAG}"
+                        echo "✅ Push SUCCESS"
                     """
                 }
             }
@@ -110,11 +111,14 @@ pipeline {
 
         // ══════════════════════════════════════
         // STAGE 6: DEPLOY DEV
-        // Docker Compose trên cùng EC2 này
+        // Docker Compose trên EC2 Medium
         // ══════════════════════════════════════
         stage('Deploy Dev') {
             when {
-                branch 'main'
+                allOf {
+                    branch 'main'
+                    not { changeRequest() }
+                }
             }
             steps {
                 echo "🚀 Deploying Frontend to Dev (Docker Compose)..."
@@ -123,12 +127,10 @@ pipeline {
                         -f ${COMPOSE_FILE} \
                         up -d frontend --pull always
 
-                    # Chờ frontend start
-                    sleep 10
+                    sleep 30
 
-                    # Kiểm tra health
                     curl -s -o /dev/null -w "%{http_code}" \
-                        http://localhost:3000 | grep 200 || \
+                        http://10.0.1.43:3000 | grep 200 || \
                         (echo "❌ Frontend health check FAILED" && exit 1)
 
                     echo "✅ Deploy Dev SUCCESS"
@@ -141,7 +143,10 @@ pipeline {
         // ══════════════════════════════════════
         stage('Approval: Deploy to Prod?') {
             when {
-                branch 'main'
+                allOf {
+                    branch 'main'
+                    not { changeRequest() }
+                }
             }
             steps {
                 timeout(time: 10, unit: 'MINUTES') {
@@ -156,11 +161,14 @@ pipeline {
 
         // ══════════════════════════════════════
         // STAGE 8: DEPLOY PROD
-        // Kind K8s trên cùng EC2 này
+        // Kind K8s trên EC2 Medium
         // ══════════════════════════════════════
         stage('Deploy Prod') {
             when {
-                branch 'main'
+                allOf {
+                    branch 'main'
+                    not { changeRequest() }
+                }
             }
             steps {
                 echo "☸️ Deploying Frontend to Production (Kind K8s)..."
@@ -172,7 +180,7 @@ pipeline {
                     kubectl rollout status deployment/frontend \
                         -n todolist --timeout=120s
 
-                    echo "✅ Deploy Prod SUCCESS: ${IMAGE_NAME}:${IMAGE_TAG}"
+                    echo "✅ Deploy Prod SUCCESS"
                 """
             }
         }
@@ -180,24 +188,27 @@ pipeline {
 
     post {
         success {
-            echo """
-            ✅ Pipeline SUCCESS
-            ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-            Image : ${IMAGE_NAME}:${IMAGE_TAG}
-            Branch: ${env.BRANCH_NAME ?: 'manual'}
-            Build : #${BUILD_NUMBER}
-            ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-            """
+            script {
+                if (env.CHANGE_ID) {
+                    echo """
+                    ✅ CI SUCCESS — PR #${env.CHANGE_ID}
+                    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+                    Stage 1-4 PASSED → Ready to merge!
+                    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+                    """
+                } else {
+                    echo """
+                    ✅ CD SUCCESS
+                    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+                    Image : ${IMAGE_NAME}:${IMAGE_TAG}
+                    Branch: ${env.BRANCH_NAME}
+                    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+                    """
+                }
+            }
         }
         failure {
-            echo """
-            ❌ Pipeline FAILED
-            ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-            Branch: ${env.BRANCH_NAME ?: 'manual'}
-            Build : #${BUILD_NUMBER}
-            → Check Console Output để xem lỗi
-            ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-            """
+            echo "❌ Pipeline FAILED — Build #${BUILD_NUMBER}"
         }
         always {
             sh "docker image prune -f || true"
