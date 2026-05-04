@@ -114,30 +114,49 @@ pipeline {
         // Docker Compose trên EC2 Medium
         // ══════════════════════════════════════
         stage('Deploy Dev') {
-            when {
-                allOf {
-                    branch 'main'
-                    not { changeRequest() }
-                }
-            }
-            steps {
-                echo "🚀 Deploying Frontend to Dev (Docker Compose)..."
-                sh """
-                    IMAGE_TAG=${IMAGE_TAG} docker compose \
-                        -f ${COMPOSE_FILE} \
-                        up -d frontend --pull always
-
-                    sleep 30
-
-                    curl -s -o /dev/null -w "%{http_code}" \
-                        http://10.0.1.43:3000 | grep 200 || \
-                        (echo "❌ Frontend health check FAILED" && exit 1)
-
-                    echo "✅ Deploy Dev SUCCESS"
-                """
-            }
+    when {
+        allOf {
+            branch 'main'
+            not { changeRequest() }
         }
+    }
+    environment {
+        DATABASE_HOST     = credentials('DB_HOST')
+        DATABASE_USER     = credentials('DB_USER')
+        DATABASE_PASSWORD = credentials('DB_PASSWORD')
+        APP_EC2_IP        = credentials('EC2_PUBLIC_IP')
+    }
+    steps {
+        echo "🚀 Deploying Frontend to Dev (Docker Compose)..."
+        sh """
+            # Pull image mới
+            docker pull ${IMAGE_NAME}:${IMAGE_TAG}
 
+            # Stop và remove container cũ
+            docker stop todolist-frontend || true
+            docker rm todolist-frontend || true
+
+            # Set env vars và deploy chỉ frontend
+            export DATABASE_HOST=${DATABASE_HOST}
+            export DATABASE_USER=${DATABASE_USER}
+            export DATABASE_PASSWORD=${DATABASE_PASSWORD}
+            export EC2_PUBLIC_IP=${APP_EC2_IP}
+            export IMAGE_TAG=${IMAGE_TAG}
+
+            IMAGE_TAG=${IMAGE_TAG} docker compose \
+                -f ${COMPOSE_FILE} \
+                up -d --no-deps --no-build frontend
+
+            sleep 30
+
+            curl -s -o /dev/null -w "%{http_code}" \
+                http://10.0.1.43:3000 | grep 200 || \
+                (echo "❌ Frontend health check FAILED" && exit 1)
+
+            echo "✅ Deploy Dev SUCCESS"
+        """
+    }
+}
         // ══════════════════════════════════════
         // STAGE 7: MANUAL APPROVAL
         // ══════════════════════════════════════
