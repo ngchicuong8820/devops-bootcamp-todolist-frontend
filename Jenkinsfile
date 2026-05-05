@@ -43,46 +43,46 @@ pipeline {
         }
 
         // ══════════════════════════════════════
-        // STAGE 3: TEST
+        // STAGE 3+4: TEST + QUALITY GATE PARALLEL
         // ══════════════════════════════════════
-        stage('Test') {
-            steps {
-                echo "🧪 Running tests..."
-                sh """
-                    docker run --rm \
-                        --name test-frontend-${BUILD_NUMBER} \
-                        ${IMAGE_NAME}:${IMAGE_TAG} \
-                        sh -c "npm test 2>&1 || true"
-                """
-                echo "✅ Test DONE"
-            }
-        }
+        stage('Test & Quality Gate') {
+            parallel {
 
-        // ══════════════════════════════════════
-        // STAGE 4: QUALITY GATE
-        // ⛔ CI (PR) DỪNG Ở ĐÂY
-        // ══════════════════════════════════════
-        stage('Quality Gate') {
-            steps {
-                echo "🔎 Running linter..."
-                sh """
-                    docker run --rm \
-                        --name lint-frontend-${BUILD_NUMBER} \
-                        ${IMAGE_NAME}:${IMAGE_TAG} \
-                        sh -c "npm run lint 2>&1 || true"
-                """
-                echo "✅ Quality Gate PASSED"
-            }
-            post {
-                failure {
-                    error "❌ Quality Gate FAILED — blocking merge!"
+                stage('Test') {
+                    steps {
+                        echo "🧪 Running tests..."
+                        sh """
+                            docker run --rm \
+                                --name test-frontend-${BUILD_NUMBER} \
+                                ${IMAGE_NAME}:${IMAGE_TAG} \
+                                sh -c "npm test 2>&1 || true"
+                        """
+                        echo "✅ Test DONE"
+                    }
+                }
+
+                stage('Quality Gate') {
+                    steps {
+                        echo "🔎 Running linter..."
+                        sh """
+                            docker run --rm \
+                                --name lint-frontend-${BUILD_NUMBER} \
+                                ${IMAGE_NAME}:${IMAGE_TAG} \
+                                sh -c "npm run lint 2>&1 || true"
+                        """
+                        echo "✅ Quality Gate PASSED"
+                    }
+                    post {
+                        failure {
+                            error "❌ Quality Gate FAILED — blocking merge!"
+                        }
+                    }
                 }
             }
         }
 
         // ══════════════════════════════════════
         // STAGE 5: PUSH TO DOCKER HUB
-        // Chỉ chạy khi push to main
         // ══════════════════════════════════════
         stage('Push to Docker Hub') {
             when {
@@ -111,52 +111,49 @@ pipeline {
 
         // ══════════════════════════════════════
         // STAGE 6: DEPLOY DEV
-        // Docker Compose trên EC2 Medium
         // ══════════════════════════════════════
         stage('Deploy Dev') {
-    when {
-        allOf {
-            branch 'main'
-            not { changeRequest() }
+            when {
+                allOf {
+                    branch 'main'
+                    not { changeRequest() }
+                }
+            }
+            environment {
+                DATABASE_HOST     = credentials('DB_HOST')
+                DATABASE_USER     = credentials('DB_USER')
+                DATABASE_PASSWORD = credentials('DB_PASSWORD')
+                APP_EC2_IP        = credentials('EC2_PUBLIC_IP')
+            }
+            steps {
+                echo "🚀 Deploying Frontend to Dev (Docker Compose)..."
+                sh """
+                    docker pull ${IMAGE_NAME}:${IMAGE_TAG}
+
+                    docker stop todolist-frontend || true
+                    docker rm todolist-frontend || true
+
+                    export DATABASE_HOST=${DATABASE_HOST}
+                    export DATABASE_USER=${DATABASE_USER}
+                    export DATABASE_PASSWORD=${DATABASE_PASSWORD}
+                    export EC2_PUBLIC_IP=${APP_EC2_IP}
+                    export IMAGE_TAG=${IMAGE_TAG}
+
+                    IMAGE_TAG=${IMAGE_TAG} docker compose \
+                        -f ${COMPOSE_FILE} \
+                        up -d --no-deps --no-build frontend
+
+                    sleep 30
+
+                    curl -s -o /dev/null -w "%{http_code}" \
+                        http://10.0.1.43:3000 | grep 200 || \
+                        (echo "❌ Frontend health check FAILED" && exit 1)
+
+                    echo "✅ Deploy Dev SUCCESS"
+                """
+            }
         }
-    }
-    environment {
-        DATABASE_HOST     = credentials('DB_HOST')
-        DATABASE_USER     = credentials('DB_USER')
-        DATABASE_PASSWORD = credentials('DB_PASSWORD')
-        APP_EC2_IP        = credentials('EC2_PUBLIC_IP')
-    }
-    steps {
-        echo "🚀 Deploying Frontend to Dev (Docker Compose)..."
-        sh """
-            # Pull image mới
-            docker pull ${IMAGE_NAME}:${IMAGE_TAG}
 
-            # Stop và remove container cũ
-            docker stop todolist-frontend || true
-            docker rm todolist-frontend || true
-
-            # Set env vars và deploy chỉ frontend
-            export DATABASE_HOST=${DATABASE_HOST}
-            export DATABASE_USER=${DATABASE_USER}
-            export DATABASE_PASSWORD=${DATABASE_PASSWORD}
-            export EC2_PUBLIC_IP=${APP_EC2_IP}
-            export IMAGE_TAG=${IMAGE_TAG}
-
-            IMAGE_TAG=${IMAGE_TAG} docker compose \
-                -f ${COMPOSE_FILE} \
-                up -d --no-deps --no-build frontend
-
-            sleep 30
-
-            curl -s -o /dev/null -w "%{http_code}" \
-                http://10.0.1.43:3000 | grep 200 || \
-                (echo "❌ Frontend health check FAILED" && exit 1)
-
-            echo "✅ Deploy Dev SUCCESS"
-        """
-    }
-}
         // ══════════════════════════════════════
         // STAGE 7: MANUAL APPROVAL
         // ══════════════════════════════════════
@@ -180,7 +177,6 @@ pipeline {
 
         // ══════════════════════════════════════
         // STAGE 8: DEPLOY PROD
-        // Kind K8s trên EC2 Medium
         // ══════════════════════════════════════
         stage('Deploy Prod') {
             when {
